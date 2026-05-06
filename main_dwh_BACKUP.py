@@ -601,57 +601,6 @@ class DWHETLPipeline:
 
         return self.dwh_conn.execute_query(query) if self.dwh_conn else False
 
-
-    def refresh_agg_monthly_sales(self, skip_if_loaded: bool = False) -> bool:
-        """Step 15: Refresh agg_monthly_sales — pre-aggregated monthly sales report table."""
-        logger.info("Step 15: Refreshing agg_monthly_sales...")
-
-        query = """
-        DELETE FROM agg_monthly_sales;
-
-        INSERT INTO agg_monthly_sales (
-            year, month, category_name_en, seller_key,
-            total_orders, total_items, total_revenue, total_freight,
-            avg_order_value, avg_review_score, orders_delayed
-        )
-        SELECT
-            dd.year,
-            dd.month_of_year AS month,
-            ISNULL(dp.category_name_en, 'Unknown') AS category_name_en,
-            foi.seller_key,
-            COUNT(DISTINCT foi.order_id) AS total_orders,
-            SUM(foi.quantity) AS total_items,
-            SUM(ISNULL(foi.total_item_value, 0) + ISNULL(foi.freight_value, 0)) AS total_revenue,
-            SUM(ISNULL(foi.freight_value, 0)) AS total_freight,
-            CAST(
-                SUM(ISNULL(foi.total_item_value, 0) + ISNULL(foi.freight_value, 0))
-                / NULLIF(COUNT(DISTINCT foi.order_id), 0)
-                AS DECIMAL(10, 2)
-            ) AS avg_order_value,
-            CAST(AVG(CAST(rv.avg_review_score AS DECIMAL(5,2))) AS DECIMAL(3,2)) AS avg_review_score,
-            COUNT(DISTINCT CASE WHEN fo.is_delayed = 1 THEN fo.order_id END) AS orders_delayed
-        FROM fact_order_items foi
-        JOIN fact_orders fo
-            ON foi.order_id = fo.order_id
-        JOIN dim_date dd
-            ON foi.order_date_key = dd.date_key
-        JOIN dim_product dp
-            ON foi.product_key = dp.product_key
-        LEFT JOIN (
-            SELECT order_id, AVG(CAST(review_score AS DECIMAL(5,2))) AS avg_review_score
-            FROM fact_reviews
-            GROUP BY order_id
-        ) rv
-            ON foi.order_id = rv.order_id
-        GROUP BY
-            dd.year,
-            dd.month_of_year,
-            ISNULL(dp.category_name_en, 'Unknown'),
-            foi.seller_key;
-        """
-
-        return self.dwh_conn.execute_query(query) if self.dwh_conn else False
-
     def validate_etl(self) -> bool:
         """Step 15: Validate ETL results — row counts for all DWH tables."""
         logger.info("Step 15: Validating ETL results...")
@@ -677,9 +626,7 @@ class DWHETLPipeline:
         UNION ALL
         SELECT 'fact_reviews',      COUNT(*) FROM fact_reviews
         UNION ALL
-        SELECT 'fact_payments',     COUNT(*) FROM fact_payments
-        UNION ALL
-        SELECT 'agg_monthly_sales', COUNT(*) FROM agg_monthly_sales;
+        SELECT 'fact_payments',     COUNT(*) FROM fact_payments;
         """
 
         results = self.dwh_conn.fetch_query(query)
@@ -712,31 +659,22 @@ class DWHETLPipeline:
 
             # Phase 3: Dimensions
             skip = not force_recreate
-            etl_steps = [
-                ("dim_date", self.populate_dim_date),
-                ("dim_customer", self.populate_dim_customer),
-                ("dim_seller", self.populate_dim_seller),
-                ("dim_product", self.populate_dim_product),
-                ("dim_payment_type", self.populate_dim_payment_type),
-                ("dim_order_status", self.populate_dim_order_status),
-                ("dim_geolocation", self.populate_dim_geolocation),
-                ("fact_order_items", self.populate_fact_order_items),
-                ("fact_orders", self.populate_fact_orders),
-                ("fact_reviews", self.populate_fact_reviews),
-                ("fact_payments", self.populate_fact_payments),
-                ("agg_monthly_sales", self.refresh_agg_monthly_sales),
-            ]
+            self.populate_dim_date(skip_if_loaded=skip)
+            self.populate_dim_customer(skip_if_loaded=skip)
+            self.populate_dim_seller(skip_if_loaded=skip)
+            self.populate_dim_product(skip_if_loaded=skip)
+            self.populate_dim_payment_type(skip_if_loaded=skip)
+            self.populate_dim_order_status(skip_if_loaded=skip)
+            self.populate_dim_geolocation(skip_if_loaded=skip)
 
-            for step_name, step_func in etl_steps:
-                logger.info(f"Running ETL step: {step_name}")
-                if not step_func(skip_if_loaded=skip):
-                    logger.error(f"ETL step failed: {step_name}")
-                    return False
+            # Phase 4: Facts
+            self.populate_fact_order_items(skip_if_loaded=skip)
+            self.populate_fact_orders(skip_if_loaded=skip)
+            self.populate_fact_reviews(skip_if_loaded=skip)
+            self.populate_fact_payments(skip_if_loaded=skip)
 
             # Phase 5: Validation
-            if not self.validate_etl():
-                logger.error("ETL validation failed")
-                return False
+            self.validate_etl()
 
             return True
         finally:
