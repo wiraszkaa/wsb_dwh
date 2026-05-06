@@ -28,6 +28,7 @@ def setup_staging_database(
     sql_file: str = "1_staging_tables.sql",
     force_recreate: bool = False,
     skip_data_load: bool = False,
+    reload_tables: set[str] | None = None,
 ) -> bool:
     """Setup staging database with raw CSV data."""
     logger.info("=" * 70)
@@ -96,7 +97,10 @@ def setup_staging_database(
         # Load data if not skipped
         if not skip_data_load:
             data_loader = DataLoader(db_conn)
-            if not data_loader.load_all_data(skip_existing=not force_recreate):
+            if not data_loader.load_all_data(
+                skip_existing=not force_recreate,
+                reload_tables=reload_tables,
+            ):
                 logger.warning("Some CSV data failed to load")
 
         logger.info("=" * 70)
@@ -144,9 +148,15 @@ def main():
         action="store_true",
         help="Skip CSV data loading, only create tables",
     )
+    parser.add_argument(
+        "--reload",
+        default="",
+        help="Comma-separated table names to force reload (skips all others)",
+    )
 
     args = parser.parse_args()
     force_recreate = args.force or args.recreate
+    reload_tables = {t.strip() for t in args.reload.split(",") if t.strip()} or None
 
     success = setup_staging_database(
         server=args.server,
@@ -155,6 +165,7 @@ def main():
         sql_file=args.sql_file,
         force_recreate=force_recreate,
         skip_data_load=args.no_load,
+        reload_tables=reload_tables,
     )
     sys.exit(0 if success else 1)
 

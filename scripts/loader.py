@@ -1,6 +1,7 @@
 """CSV data loading for Olist dataset."""
 
 import csv
+import json
 import logging
 import os
 from typing import Dict, Tuple
@@ -43,7 +44,7 @@ class DataLoader:
             error_count = 0
             cursor = self.connection.connection.cursor()
 
-            with open(csv_file, "r", encoding="utf-8") as f:
+            with open(csv_file, "r", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
 
                 if not reader.fieldnames:
@@ -96,6 +97,8 @@ class DataLoader:
                 self.connection.connection.rollback()
             return False, 0
 
+    LOAD_STATUS_FILE = "load_status.json"
+
     def _get_table_row_count(self, table_name: str) -> int:
         """Return current row count for a table, or -1 on error."""
         try:
@@ -108,12 +111,43 @@ class DataLoader:
     def _count_csv_rows(self, csv_file: str) -> int:
         """Count data rows in CSV file (excluding header), or -1 on error."""
         try:
-            with open(csv_file, "r", encoding="utf-8") as f:
+            with open(csv_file, "r", encoding="utf-8-sig") as f:
                 return sum(1 for _ in f) - 1
         except Exception:
             return -1
 
-    def load_all_data(self, skip_existing: bool = True) -> bool:
+    def _read_status(self) -> dict[str, int]:
+        """Return persisted load status (table -> inserted row count)."""
+        try:
+            with open(self.LOAD_STATUS_FILE, "r") as f:
+                data = json.load(f)
+                return {str(k): int(v) for k, v in data.items()}
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _write_status(self, table_name: str, row_count: int) -> None:
+        """Record a completed load so resume logic can skip it next run."""
+        status = self._read_status()
+        status[table_name] = row_count
+        with open(self.LOAD_STATUS_FILE, "w") as f:
+            json.dump(status, f, indent=2)
+
+    def _bootstrap_status(self, exclude: set[str]) -> None:
+        """Populate status file from current DB counts for tables not in exclude set.
+        Used when the status file is missing but tables already have correct data.
+        """
+        status = self._read_status()
+        for table_name in self.CSV_TABLE_MAPPING.values():
+            if table_name in exclude or table_name in status:
+                continue
+            count = self._get_table_row_count(table_name)
+            if count > 0:
+                status[table_name] = count
+                logger.info(f"Bootstrapped status for {table_name} ({count} rows)")
+        with open(self.LOAD_STATUS_FILE, "w") as f:
+            json.dump(status, f, indent=2)
+
+    def load_all_data(self, skip_existing: bool = True, reload_tables: set[str] | None = None) -> bool:
         """Load all CSV data into the database."""
         logger.info("=" * 60)
         logger.info("Loading CSV Data")
@@ -128,29 +162,41 @@ class DataLoader:
         total_count = len(self.CSV_TABLE_MAPPING)
         total_rows = 0
 
+        if reload_tables:
+            self._bootstrap_status(exclude=reload_tables)
+
+        status = self._read_status() if skip_existing else {}
+
         table_items = list(self.CSV_TABLE_MAPPING.items())
         with tqdm(total=len(table_items), desc="Tables", unit="table") as outer:
             for csv_file, table_name in table_items:
                 outer.set_postfix(table=table_name)
-                if skip_existing:
-                    expected = self._count_csv_rows(csv_file)
+                force_this = reload_tables is not None and table_name in reload_tables
+                if skip_existing and not force_this:
                     actual = self._get_table_row_count(table_name)
+                    recorded = status.get(table_name, -1)
 
-                    if expected > 0 and actual >= expected:
+                    if recorded >= 0 and actual == recorded:
                         logger.info(f"Skipping {table_name} ({actual} rows, complete)")
                         skipped_count += 1
                         outer.update(1)
                         continue
                     elif actual > 0:
                         logger.warning(
-                            f"Partial load in {table_name} ({actual}/{expected} rows), truncating and reloading"
+                            f"Partial load in {table_name} ({actual} rows, expected {recorded}), truncating and reloading"
                         )
+                        self.connection.execute_query(f"TRUNCATE TABLE {table_name}")
+                elif force_this:
+                    actual = self._get_table_row_count(table_name)
+                    if actual > 0:
+                        logger.info(f"Forcing reload of {table_name}, truncating ({actual} rows)")
                         self.connection.execute_query(f"TRUNCATE TABLE {table_name}")
 
                 success, row_count = self.load_csv_to_table(csv_file, table_name)
                 if success:
                     success_count += 1
                     total_rows += row_count
+                    self._write_status(table_name, row_count)
                 else:
                     logger.warning(f"Failed to load {csv_file}")
                 outer.update(1)
