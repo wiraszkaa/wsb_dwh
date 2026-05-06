@@ -1,0 +1,55 @@
+version: "3.8"
+
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: olist-mssql
+    user: root
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Test123!"
+      MSSQL_PID: "Express"
+      MSSQL_DATA_DIR: /var/opt/mssql/data
+      MSSQL_TCP_PORT: 1433
+      MSSQL_ENCRYPT: "NO"
+    ports:
+      - "1433:1433"
+    volumes:
+      # Data directory
+      - mssql_data:/var/opt/mssql/data
+      # Log directory
+      - mssql_logs:/var/opt/mssql/log
+      # Backup directory
+      - mssql_backup:/var/opt/mssql/backup
+    networks:
+      - olist-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/opt/mssql-tools/bin/sqlcmd",
+          "-S",
+          "localhost",
+          "-U",
+          "sa",
+          "-P",
+          "Test123!",
+          "-Q",
+          "SELECT 1",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  mssql_data:
+    driver: local
+  mssql_logs:
+    driver: local
+  mssql_backup:
+    driver: local
+
+networks:
+  olist-network:
+    driver: bridge
